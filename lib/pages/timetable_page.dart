@@ -26,10 +26,28 @@ class _TimetablePageState extends State<TimetablePage> {
     super.initState();
     timetableData = TimetableData.fromJson(widget.timetableJson);
 
+    // 当 semesters 为空时，用 all_semesters_meta 构造一个占位学期，确保可以自动加载
+    if (timetableData.semesters.isEmpty && timetableData.allSemestersMeta.isNotEmpty) {
+      final placeholderSemId = timetableData.allSemestersMeta.firstWhere(
+        (m) => m.semName == timetableData.defaultSemester || m.semId == timetableData.defaultSemester,
+        orElse: () => timetableData.allSemestersMeta.first,
+      ).semId;
+      timetableData = TimetableData.fromJson({
+        ...widget.timetableJson,
+        'semesters': [
+          {
+            'sem_id': placeholderSemId,
+            'sem_name': timetableData.defaultSemester,
+            'weeks': [],
+          }
+        ],
+      });
+    }
+
     // 默认选中
     selectedSemester = timetableData.semesters.isNotEmpty
         ? timetableData.semesters.firstWhere(
-            (s) => s.semName == timetableData.defaultSemester,
+            (s) => s.semName == timetableData.defaultSemester || s.semId == timetableData.defaultSemester,
             orElse: () => timetableData.semesters.first,
           )
         : throw Exception('无可用学期');
@@ -41,8 +59,9 @@ class _TimetablePageState extends State<TimetablePage> {
           )
         : TimetableWeek(weekName: '暂无周', courses: {}, weekId: '');
 
-    // 首帧后后台静默预加载其它学期
+    // 首帧后后台静默预加载当前学期与其它学期
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      _ensureSemesterWeeksLoaded(selectedSemester);
       _preloadOtherSemesters();
     });
   }
@@ -87,7 +106,7 @@ class _TimetablePageState extends State<TimetablePage> {
         captcha: login['captcha']?.isNotEmpty == true ? login['captcha'] : null,
         sessionId: login['session_id']?.isNotEmpty == true ? login['session_id'] : null,
         semId: sem.semId,
-        maxWeeks: 10,
+        maxWeeks: 19,
       );
       // 合并返回到当前数据结构
       await _mergeWeeksIntoState(sem.semId, resp['weeks'] as List? ?? []);
@@ -182,7 +201,7 @@ class _TimetablePageState extends State<TimetablePage> {
             captcha: login['captcha']?.isNotEmpty == true ? login['captcha'] : null,
             sessionId: login['session_id']?.isNotEmpty == true ? login['session_id'] : null,
             semId: meta.semId,
-            maxWeeks: 10,
+            maxWeeks: 19,
           );
           await _mergeWeeksIntoState(meta.semId, resp['weeks'] as List? ?? []);
         } catch (_) {
@@ -228,40 +247,53 @@ class _TimetablePageState extends State<TimetablePage> {
 
   Widget _buildCourseChip(Map<String, dynamic> c) {
     final content = (c['content'] ?? '').toString();
-    String name = content;
+    
+    
+    // 按照后端返回的格式：课程名 班级 教师 地点
+    List<String> parts = content.split(' ');
+    
+    String name = '';
     String teacher = '';
     String place = '';
     
-    // 直接在字符串中查找"233-1班"或"233_1班"的位置
-    String classMarker = '';
-    if (content.contains('233-1班')) {
-      classMarker = '233-1班';
-    } else if (content.contains('233_1班')) {
-      classMarker = '233_1班';
-    }
-    
-    if (classMarker.isNotEmpty) {
-      // 分割字符串
-      List<String> segments = content.split(classMarker);
-      if (segments.length >= 2) {
-        // 课程名是"233-1班"之前的内容
-        name = segments[0].trim();
-        
-        // 教师名和地点在"233-1班"之后
-        String afterClass = segments[1].trim();
-        
-        // 查找"高新"的位置来分割教师名和地点
-        if (afterClass.contains('高新')) {
-          List<String> teacherPlace = afterClass.split('高新');
-          if (teacherPlace.length >= 2) {
-            teacher = teacherPlace[0].trim();
-            place = '高新' + teacherPlace[1].trim();
-          } else {
-            teacher = afterClass;
-          }
-        } else {
-          teacher = afterClass;
+    if (parts.isNotEmpty) {
+      // 课程名通常是第一部分
+      name = parts[0];
+      
+      // 查找班级信息（包含"班"字的）
+      String classInfo = '';
+      for (int i = 1; i < parts.length; i++) {
+        if (parts[i].contains('班')) {
+          classInfo = parts[i];
+          name = '$name $classInfo'; // 将班级信息添加到课程名
+          break;
         }
+      }
+      
+      // 查找教师信息（班级之后，地点之前）
+      int teacherStartIndex = -1;
+      int placeStartIndex = -1;
+      
+      for (int i = 1; i < parts.length; i++) {
+        if (parts[i].contains('班') && teacherStartIndex == -1) {
+          teacherStartIndex = i + 1;
+        }
+        if ((parts[i].contains('高新校区') || parts[i].contains('花源校区')) && placeStartIndex == -1) {
+          placeStartIndex = i;
+          break;
+        }
+      }
+      
+      // 提取教师信息
+      if (teacherStartIndex != -1 && placeStartIndex != -1 && teacherStartIndex < placeStartIndex) {
+        teacher = parts.sublist(teacherStartIndex, placeStartIndex).join(' ');
+      } else if (teacherStartIndex != -1 && placeStartIndex == -1) {
+        teacher = parts.sublist(teacherStartIndex).join(' ');
+      }
+      
+      // 提取地点信息
+      if (placeStartIndex != -1) {
+        place = parts.sublist(placeStartIndex).join(' ');
       }
     }
 
@@ -424,6 +456,7 @@ class _TimetablePageState extends State<TimetablePage> {
       return const Center(child: Text('本周暂无课程'));
     }
     final periods = _collectPeriods(selectedWeek);
+    final isLandscape = MediaQuery.of(context).orientation == Orientation.landscape;
 
     final header = TableRow(
       decoration: const BoxDecoration(color: Color(0xFFF5F5F5)),
@@ -483,8 +516,9 @@ class _TimetablePageState extends State<TimetablePage> {
             child: Table(
               defaultVerticalAlignment: TableCellVerticalAlignment.top,
               columnWidths: {
-                0: const FixedColumnWidth(72),
-                for (int i = 1; i <= days.length; i++) i: const FixedColumnWidth(120),
+                0: FixedColumnWidth(isLandscape ? 60 : 72),
+                for (int i = 1; i <= days.length; i++) 
+                  i: FixedColumnWidth(isLandscape ? 140 : 120),
               },
               border: const TableBorder(
                 top: BorderSide(color: Color(0xFFE0E0E0)),
@@ -504,6 +538,8 @@ class _TimetablePageState extends State<TimetablePage> {
 
   @override
   Widget build(BuildContext context) {
+    final isLandscape = MediaQuery.of(context).orientation == Orientation.landscape;
+    
     return Scaffold(
       appBar: AppBar(
         title: Row(
@@ -557,23 +593,133 @@ class _TimetablePageState extends State<TimetablePage> {
             ],
           ),
         ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            // 学期选择
-            if (timetableData.semesters.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                child: Center( // 添加Center包装整个下拉菜单
+        child: isLandscape 
+          ? _buildLandscapeLayout()
+          : _buildPortraitLayout(),
+      ),
+    );
+  }
+
+  Widget _buildPortraitLayout() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // 学期选择
+        if (timetableData.semesters.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            child: Center(
+              child: DropdownButton<String>(
+                alignment: Alignment.center,
+                value: selectedSemester.semId.isNotEmpty ? selectedSemester.semId : null,
+                items: timetableData.semesters.take(6).map((s) {
+                  return DropdownMenuItem(
+                    value: s.semId,
+                    child: Center(
+                      child: Text(s.semName),
+                    ),
+                  );
+                }).toList(),
+                onChanged: (id) async {
+                  if (id == null) return;
+                  final s = timetableData.semesters.firstWhere((e) => e.semId == id);
+                  await _ensureSemesterWeeksLoaded(s);
+                  setState(() {
+                    selectedSemester = s;
+                    selectedWeek = s.weeks.isNotEmpty
+                        ? s.weeks.first
+                        : TimetableWeek(weekName: '暂无周', courses: {}, weekId: '');
+                  });
+                },
+              ),
+            ),
+          )
+        else
+          const Padding(
+            padding: EdgeInsets.all(24),
+            child: Center(child: Text('暂无学期数据')),
+          ),
+        // 周次选择
+        if (selectedSemester.weeks.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            child: Center(
+              child: DropdownButton<String>(
+                alignment: Alignment.center,
+                value: selectedWeek.weekId.isNotEmpty ? selectedWeek.weekId : null,
+                items: selectedSemester.weeks.map((w) {
+                  return DropdownMenuItem(
+                    value: w.weekId,
+                    child: Center(
+                      child: Text(w.weekName),
+                    ),
+                  );
+                }).toList(),
+                onChanged: (wid) {
+                  if (wid != null) {
+                    final w = selectedSemester.weeks.firstWhere((e) => e.weekId == wid, orElse: () => selectedSemester.weeks.first);
+                    setState(() {
+                      selectedWeek = w;
+                    });
+                  }
+                },
+              ),
+            ),
+          ),
+        // 加载状态
+        if (loadingWeeks)
+          const Padding(
+            padding: EdgeInsets.all(16),
+            child: Center(child: CircularProgressIndicator()),
+          ),
+        if (loadError != null)
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: Text('加载错误: $loadError', style: const TextStyle(color: Colors.red)),
+          ),
+        // 课表内容
+        Expanded(
+          child: Container(
+            decoration: const BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.only(
+                topLeft: Radius.circular(20),
+                topRight: Radius.circular(20),
+              ),
+            ),
+            child: _buildTimetableTable(),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildLandscapeLayout() {
+    return Row(
+      children: [
+        // 左侧控制面板
+        Container(
+          width: 200,
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.only(
+              topRight: Radius.circular(20),
+            ),
+          ),
+          child: Column(
+            children: [
+              const SizedBox(height: 20),
+              // 学期选择
+              if (timetableData.semesters.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
                   child: DropdownButton<String>(
-                    alignment: Alignment.center, // 添加居中对齐
+                    isExpanded: true,
                     value: selectedSemester.semId.isNotEmpty ? selectedSemester.semId : null,
-                    items: timetableData.semesters.take(6).map((s) { // 只显示前6个学期
+                    items: timetableData.semesters.take(6).map((s) {
                       return DropdownMenuItem(
                         value: s.semId,
-                        child: Center( // 添加Center包装
-                          child: Text(s.semName),
-                        ),
+                        child: Text(s.semName, overflow: TextOverflow.ellipsis),
                       );
                     }).toList(),
                     onChanged: (id) async {
@@ -589,26 +735,17 @@ class _TimetablePageState extends State<TimetablePage> {
                     },
                   ),
                 ),
-              )
-            else
-              const Padding(
-                padding: EdgeInsets.all(24),
-                child: Center(child: Text('暂无学期数据')),
-              ),
-            // 周次选择
-            if (selectedSemester.weeks.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                child: Center( // 添加Center包装整个下拉菜单
+              // 周次选择
+              if (selectedSemester.weeks.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
                   child: DropdownButton<String>(
-                    alignment: Alignment.center, // 添加居中对齐
+                    isExpanded: true,
                     value: selectedWeek.weekId.isNotEmpty ? selectedWeek.weekId : null,
                     items: selectedSemester.weeks.map((w) {
                       return DropdownMenuItem(
                         value: w.weekId,
-                        child: Center( // 添加Center包装
-                          child: Text(w.weekName),
-                        ),
+                        child: Text(w.weekName),
                       );
                     }).toList(),
                     onChanged: (wid) {
@@ -621,34 +758,33 @@ class _TimetablePageState extends State<TimetablePage> {
                     },
                   ),
                 ),
-              ),
-            // 加载状态
-            if (loadingWeeks)
-              const Padding(
-                padding: EdgeInsets.all(16),
-                child: Center(child: CircularProgressIndicator()),
-              ),
-            if (loadError != null)
-              Padding(
-                padding: const EdgeInsets.all(16),
-                child: Text('加载错误: $loadError', style: const TextStyle(color: Colors.red)),
-              ),
-            // 课表内容
-            Expanded(
-              child: Container(
-                decoration: const BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.only(
-                    topLeft: Radius.circular(20),
-                    topRight: Radius.circular(20),
-                  ),
+              // 加载状态
+              if (loadingWeeks)
+                const Padding(
+                  padding: EdgeInsets.all(16),
+                  child: CircularProgressIndicator(),
                 ),
-                child: _buildTimetableTable(),
+              if (loadError != null)
+                Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Text('加载错误: $loadError', style: const TextStyle(color: Colors.red, fontSize: 12)),
+                ),
+            ],
+          ),
+        ),
+        // 右侧课表内容
+        Expanded(
+          child: Container(
+            decoration: const BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.only(
+                topLeft: Radius.circular(20),
               ),
             ),
-          ],
+            child: _buildTimetableTable(),
+          ),
         ),
-      ),
+      ],
     );
   }
 }
